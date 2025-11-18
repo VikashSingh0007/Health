@@ -14,12 +14,21 @@ import { UserHealthData } from './database/entities/health-data.entity';
       envFilePath: '.env',
     }),
     TypeOrmModule.forRoot({
-      type: 'postgres',
-      host: process.env.DATABASE_HOST || 'localhost',
-      port: parseInt(process.env.DATABASE_PORT) || 5432,
-      username: process.env.DATABASE_USER || 'postgres',
-      password: process.env.DATABASE_PASSWORD,
-      database: process.env.DATABASE_NAME || 'health_app_db',
+      // Use DATABASE_URL if available (Render.com format), otherwise use individual variables
+      ...(process.env.DATABASE_URL
+        ? {
+            type: 'postgres',
+            url: process.env.DATABASE_URL,
+            ssl: { rejectUnauthorized: false },
+          }
+        : {
+            type: 'postgres',
+            host: process.env.DATABASE_HOST || 'localhost',
+            port: parseInt(process.env.DATABASE_PORT || '5432', 10),
+            username: process.env.DATABASE_USER || 'postgres',
+            password: process.env.DATABASE_PASSWORD,
+            database: process.env.DATABASE_NAME || 'health_app_db',
+          }),
       entities: [User, UserHealthData],
       synchronize: process.env.NODE_ENV !== 'production',
       logging: process.env.NODE_ENV === 'development',
