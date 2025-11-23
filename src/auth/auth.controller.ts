@@ -6,9 +6,7 @@ import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
 import { GoogleTokenRefreshService } from './google-token-refresh.service';
-
-// Simple in-memory store for redirect URLs (keyed by session ID or user agent)
-const redirectUrlStore = new Map<string, string>();
+import { redirectUrlStore } from './redirect-url.store';
 
 @Controller('auth')
 export class AuthController {
@@ -30,13 +28,43 @@ export class AuthController {
     const user = req.user as any;
     const result = await this.authService.login(user);
 
+    console.log('=== OAuth Callback Debug ===');
+    console.log('Cookies:', req.cookies);
+    console.log('Query params:', req.query);
+    console.log('Headers referer:', req.headers.referer);
+
     // Try to get redirect URL from cookie first
     let redirectUrl: string | null = null;
     
     if (req.cookies && req.cookies.oauth_redirect_url) {
       redirectUrl = req.cookies.oauth_redirect_url;
+      console.log('Found redirect URL in cookie:', redirectUrl);
       // Clear the cookie
       res.clearCookie('oauth_redirect_url');
+    }
+
+    // If not in cookie, check state parameter (Google might preserve it)
+    if (!redirectUrl) {
+      const stateParam = req.query.state as string;
+      if (stateParam) {
+        try {
+          const decodedState = decodeURIComponent(stateParam);
+          // Check if it's a valid URL
+          try {
+            const stateUrl = new URL(decodedState);
+            redirectUrl = stateUrl.origin;
+            console.log('Found redirect URL in state parameter:', redirectUrl);
+          } catch (urlError) {
+            // State might not be a URL, try to use it as-is if it looks like localhost
+            if (decodedState.includes('localhost:') || decodedState.includes('127.0.0.1:')) {
+              redirectUrl = decodedState;
+              console.log('Using state as redirect URL:', redirectUrl);
+            }
+          }
+        } catch (e) {
+          console.error('Error parsing state parameter:', e);
+        }
+      }
     }
 
     // If not in cookie, try memory store
@@ -47,6 +75,7 @@ export class AuthController {
         const [key, url] = entries[entries.length - 1];
         redirectUrl = url;
         redirectUrlStore.delete(key);
+        console.log('Found redirect URL in memory store:', redirectUrl);
       }
     }
 
@@ -55,9 +84,8 @@ export class AuthController {
       try {
         // Clean up the URL - remove any trailing slashes and ensure proper format
         const cleanUrl = redirectUrl.replace(/\/+$/, ''); // Remove trailing slashes
-        console.log('Redirecting to Flutter app:', cleanUrl);
-        res.redirect(`${cleanUrl}/?token=${result.access_token}`);
-        return;
+        console.log('✅ Redirecting to Flutter app:', cleanUrl);
+        return res.redirect(`${cleanUrl}/?token=${result.access_token}`);
       } catch (e) {
         console.error('Error redirecting to Flutter app:', e);
       }
@@ -71,31 +99,149 @@ export class AuthController {
         const refererMatch = referer.match(/https?:\/\/[^\/]+/);
         if (refererMatch) {
           const webAppUrl = refererMatch[0];
-          console.log('Redirecting to Flutter app (from referer):', webAppUrl);
-          res.redirect(`${webAppUrl}/?token=${result.access_token}`);
-          return;
+          console.log('✅ Redirecting to Flutter app (from referer):', webAppUrl);
+          return res.redirect(`${webAppUrl}/?token=${result.access_token}`);
         }
       } catch (e) {
         console.error('Error parsing referer:', e);
       }
     }
 
-    // Default: redirect to success page with instructions
-    console.log('No redirect URL found, using default success page');
+    // Last resort: redirect to success page which will try to read from localStorage
+    console.log('⚠️ No redirect URL found, redirecting to success page');
+    console.log('Token:', result.access_token.substring(0, 20) + '...');
     res.redirect(
       `http://localhost:3000/auth/success?token=${result.access_token}`,
     );
   }
 
   @Get('success')
-  async authSuccess(@Req() req: Request) {
+  async authSuccess(@Req() req: Request, @Res() res: Response) {
     const token = req.query.token as string;
-    return {
+    const redirectUrl = req.query.redirect as string;
+    
+    // If redirect URL is provided, redirect there with token
+    if (redirectUrl && token) {
+      try {
+        const cleanUrl = redirectUrl.replace(/\/+$/, '');
+        return res.redirect(`${cleanUrl}/?token=${token}`);
+      } catch (e) {
+        console.error('Error redirecting from success page:', e);
+      }
+    }
+    
+    // Otherwise, show HTML page with token and auto-redirect script
+    if (token) {
+      const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Authentication Successful</title>
+          <meta charset="UTF-8">
+          <script>
+            // Try to get redirect URL from localStorage
+            let redirectUrl = localStorage.getItem('oauth_redirect_url');
+            console.log('Redirect URL from localStorage:', redirectUrl);
+            
+            // If not found, try common Flutter web ports
+            if (!redirectUrl || redirectUrl === '') {
+              // Try to detect Flutter app URL from common ports
+              const commonPorts = [54321, 54322, 54323, 8080, 8081, 8082];
+              for (const port of commonPorts) {
+                const testUrl = 'http://localhost:' + port;
+                // Try to ping it (this won't work due to CORS, but we can try)
+                redirectUrl = testUrl;
+                break; // Use first port as default
+              }
+            }
+            
+            if (redirectUrl && redirectUrl !== '') {
+              // Clean up URL
+              redirectUrl = redirectUrl.replace(/\\/+$/, '');
+              const redirectWithToken = redirectUrl + '/?token=${token}';
+              console.log('Redirecting to:', redirectWithToken);
+              // Try immediate redirect
+              window.location.href = redirectWithToken;
+              
+              // Fallback: try after 1 second if still on this page
+              setTimeout(() => {
+                if (window.location.href.includes('/auth/success')) {
+                  console.log('Still on success page, trying redirect again...');
+                  window.location.href = redirectWithToken;
+                }
+              }, 1000);
+            } else {
+              // Show token for manual copy
+              console.log('No redirect URL found, showing token');
+              document.getElementById('token-display').style.display = 'block';
+              document.getElementById('redirecting-msg').style.display = 'none';
+            }
+          </script>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              display: flex;
+              justify-content: center;
+              align-items: center;
+              height: 100vh;
+              margin: 0;
+              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            }
+            .container {
+              background: white;
+              padding: 30px;
+              border-radius: 10px;
+              box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+              max-width: 500px;
+              text-align: center;
+            }
+            .token-box {
+              background: #f5f5f5;
+              padding: 15px;
+              border-radius: 5px;
+              word-break: break-all;
+              margin: 20px 0;
+              font-size: 12px;
+            }
+            button {
+              background: #667eea;
+              color: white;
+              border: none;
+              padding: 10px 20px;
+              border-radius: 5px;
+              cursor: pointer;
+              margin: 5px;
+            }
+            button:hover {
+              background: #5568d3;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h2>Authentication Successful!</h2>
+            <p id="redirecting-msg">Redirecting to app...</p>
+            <div id="token-display" style="display: none;">
+              <p>If you're not redirected automatically:</p>
+              <p>1. Check the Flutter app is running</p>
+              <p>2. Copy this token and paste it in the app:</p>
+              <div class="token-box">${token}</div>
+              <button onclick="navigator.clipboard.writeText('${token}')">Copy Token</button>
+            </div>
+          </div>
+        </body>
+        </html>
+      `;
+      res.setHeader('Content-Type', 'text/html');
+      return res.send(html);
+    }
+    
+    return res.json({
       message: 'Authentication successful',
       token,
       instructions:
         'Copy this token and use it in Authorization header as: Bearer <token>',
-    };
+    });
   }
 
   @Get('error')

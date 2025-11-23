@@ -145,6 +145,32 @@ export class HealthController {
   }
 
   /**
+   * Fetch real health data from Google Fit API for last N days
+   * This will fetch actual data from user's Google Fit account
+   */
+  @Post('test/fetch-real-data')
+  @UseGuards(JwtAuthGuard)
+  async fetchRealData(
+    @Req() req: Request,
+    @Body() body: { days?: number },
+  ) {
+    const user = req.user as any;
+    const days = body.days || 30;
+    
+    const fetchedCount = await this.healthDataService.fetchRealDataFromGoogleFit(
+      user.userId,
+      days,
+    );
+    
+    return {
+      message: `Real data fetched from Google Fit successfully`,
+      fetchedCount,
+      days,
+      userId: user.userId,
+    };
+  }
+
+  /**
    * Get leaderboard - all users ranked by steps or calories
    * Supports date range filtering: today, week, month
    */
